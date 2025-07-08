@@ -1,0 +1,8 @@
+fastapi==0.111.0
+uvicorn
+pdfplumber
+mangum
+requests
+python-multipart
+pydantic==2.7.1
+pydantic_core==2.18.2

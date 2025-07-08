@@ -1,0 +1,79 @@
+service: nbim-data-api
+
+plugins:
+  - serverless-python-requirements   # bundles site-packages into the zip
+
+package:
+  patterns:
+    - '!tests/**'
+    - '!**/__pycache__/**'
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'prod'}          # → override with  --stage dev
+  timeout: 30
+  memorySize: 512
+  apiGateway:
+    apiKeys:
+      - name: nbimDataApiKey
+    usagePlan:
+      quota:
+        limit: 10000
+        period: MONTH
+      throttle:
+        rateLimit: 10
+        burstLimit: 50
+
+  # Replace the NBIM_API_KEY with your own API key
+  environment:
+    NBIM_API_URL:  https://vd.a.nbim.no
+    NBIM_API_KEY: arn:aws:secretsmanager:us-east-1:936165954724:secret:nbim-data-api/NBIM_API_KEY-Gb3jwu
+    S3_BUCKET: proxy-advisor-ai-kloos11a
+    SIGNED_URL_EXPIRY: '604800'        # 7 days in seconds
+
+  iam:
+    role:
+      statements:
+        # Allow the function to PUT/GET objects under *any* prefix
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+          Resource: arn:aws:s3:::proxy-advisor-ai-kloos11a/*
+
+        # (optional but recommended) Allow listing the bucket so HEAD/exists() works
+        - Effect: Allow
+          Action: s3:ListBucket
+          Resource: arn:aws:s3:::proxy-advisor-ai-kloos11a
+        - Effect: Allow
+          Action:
+            - secretsmanager:GetSecretValue
+          Resource:
+            - arn:aws:secretsmanager:us-east-1:936165954724:secret:nbim-data-api/NBIM_API_KEY-Gb3jwu
+
+functions:
+  # 1️⃣ GET  /nbim/meetings?isin=…&ticker=…&limit=…
+  listMeetings:
+    handler: handler.list_meetings
+    description: 'List recent NBIM meetings for an ISIN and ticker'
+    memorySize: 256
+    timeout: 10
+    events:
+      - http:                  # REST API (supports apiKey)
+          path: /nbim/meetings
+          method: get
+          private: true        # ⬅︎ requires x-api-key
+
+  # 2️⃣ POST /nbim/meetings/fetch {isin, ticker, num}
+  fetchMeetings:
+    handler: handler.fetch_and_upload
+    description: 'Download NBIM meeting JSON, store on S3, return URLs'
+    memorySize: 512
+    timeout: 25
+    events:
+      - http:
+          path: /nbim/meetings/fetch
+          method: post
+          private: true        # ⬅︎ requires x-api-key

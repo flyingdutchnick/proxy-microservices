@@ -1,0 +1,68 @@
+service: proxyvote
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  httpApi:
+    authorizers:
+      customApiKeyAuthorizer:
+        type: request
+        functionName: myApiKeyAuthorizer
+        identitySource:
+          - $request.header.x-api-key
+        enableSimpleResponses: true
+  vpc:
+    securityGroupIds: [sg-05d60f2d91098bb1d]
+    subnetIds: [subnet-8f8444d6, subnet-4c0c9f29]
+  environment:
+    PG_SECRET_ARN: arn:aws:secretsmanager:us-east-1:936165954724:secret:proxyvote/pg_dsn-W9fe2v
+    OPENAI_API_KEY: arn:aws:secretsmanager:us-east-1:936165954724:secret:proxyvote/openai_api_key-rQYW39
+    LAMBDA_API_KEY: arn:aws:secretsmanager:us-east-1:936165954724:secret:proxyvote/lambda_x_api_key-WmER0p
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - secretsmanager:GetSecretValue
+          Resource:
+            - arn:aws:secretsmanager:us-east-1:936165954724:secret:proxyvote/openai_api_key-*
+            - arn:aws:secretsmanager:us-east-1:936165954724:secret:proxyvote/pg_dsn-*
+            - arn:aws:secretsmanager:us-east-1:936165954724:secret:proxyvote/lambda_x_api_key-*
+
+functions:
+
+  myApiKeyAuthorizer:   # <--- This is the function name referenced below
+    handler: authorizer.lambda_handler
+
+  createJob:
+    handler: handler.create_job_handler
+    events:
+      - httpApi:
+          path: /jobs
+          method: post
+          authorizer:
+            name: customApiKeyAuthorizer
+    layers:
+    - arn:aws:lambda:us-east-1:936165954724:layer:psycopg3-layer:4
+
+  getJob:
+    handler: handler.get_job_handler
+    events:
+      - httpApi:
+          path: /jobs/{job_id}
+          method: get
+          authorizer:
+            name: customApiKeyAuthorizer
+    layers:
+      - arn:aws:lambda:us-east-1:936165954724:layer:psycopg3-layer:4
+
+  worker:
+    handler: handler.worker_handler
+    # You can trigger on schedule (EventBridge) or via SQS queue, or run manually for now.
+    events:
+      - schedule:
+          rate: rate(1 minute)  # runs every minute to pick up pending jobs
+    timeout: 900  # 15 minutes
+    layers:
+      - arn:aws:lambda:us-east-1:936165954724:layer:psycopg3-layer:4

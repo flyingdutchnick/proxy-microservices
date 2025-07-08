@@ -1,0 +1,29 @@
+
+service: pdf-extract-api
+
+provider:
+  name: aws
+  runtime: python3.11
+  region: us-east-1           # Or your preferred region
+  stage: dev
+  tags:
+    Project: PDFExtractAPI
+  apiGateway:
+    apiKeys:
+      - pdfExtractApiKey
+
+functions:
+  api:
+    handler: app.handler
+    events:
+      - http:
+          path: /extract-text
+          method: post
+          private: true   # Requires API key
+
+plugins:
+  - serverless-python-requirements
+
+custom:
+  pythonRequirements:
+    dockerizePip: true
