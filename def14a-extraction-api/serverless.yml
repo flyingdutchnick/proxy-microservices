@@ -1,0 +1,190 @@
+service: proxy-api
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  vpc:
+    securityGroupIds: [sg-05d60f2d91098bb1d]
+    subnetIds: [subnet-8f8444d6, subnet-4c0c9f29]
+  environment:
+    S3_BUCKET: ${ssm:/proxy-api/s3_bucket}
+    PG_DSN: ${ssm:/proxy-api/pg_dsn}
+    OPENAI_API_KEY: ${ssm:/proxy-api/openai_api_key}
+  layers:
+    - arn:aws:lambda:us-east-1:936165954724:layer:lambda-dependencies-layer:1
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:PutObject
+          Resource: arn:aws:s3:::${ssm:/proxy-api/s3_bucket}/*
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:us-east-1:936165954724:parameter/proxy-api/s3_bucket
+            - arn:aws:ssm:us-east-1:936165954724:parameter/proxy-api/pg_dsn
+
+plugins:
+  - serverless-python-requirements
+  - serverless-step-functions
+
+functions:
+  ingestProxyFiling:
+    handler: lambdas/proxy_ingest/ingest_proxy_filing.handler
+    timeout: 30
+
+  extractFilingText:
+    handler: lambdas/proxy_ingest/extract_filing_text.handler
+    timeout: 30
+
+  chunkText:
+    handler: lambdas/proxy_ingest/chunk_text.handler
+    timeout: 30
+
+  embedChunks:
+    handler: lambdas/proxy_ingest/embed_chunks.handler
+    timeout: 120
+
+  storeToRds:
+    handler: lambdas/proxy_ingest/store_to_rds.handler
+    timeout: 30
+
+  extractQuestions:
+    handler: lambdas/proxy_ingest/extract_questions.handler
+    timeout: 900
+
+  getPendingQuestions:
+    handler: lambdas/voting_engine/get_pending_questions.handler
+    timeout: 30
+
+  markProcessing:
+    handler: lambdas/voting_engine/mark_processing.handler
+    timeout: 30
+
+  generateRec:
+    handler: lambdas/voting_engine/generate_rec.handler
+    timeout: 120  # big enough for the LLM call
+
+  storeRec:
+    handler: lambdas/voting_engine/store_rec.handler
+    timeout: 30
+
+  markError:
+    handler: lambdas/voting_engine/mark_error.handler
+    timeout: 30
+
+stepFunctions:
+  stateMachines:
+    proxyIngestStateMachine:
+      name: proxy-ingest-state-machine
+      definition:
+        StartAt: IngestProxy
+        States:
+          IngestProxy:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [IngestProxyFilingLambdaFunction, Arn]
+            Next: MapState
+          MapState:
+            Type: Map
+            ItemsPath: $.results
+            ResultPath: $.processed
+            Parameters:
+              "s3_key.$": "$$.Map.Item.Value.s3_key"
+              "proxy_id.$": "$$.Map.Item.Value.proxy_id"
+              "cik.$": "$$.Map.Item.Value.cik"
+              "accession_number.$": "$$.Map.Item.Value.accession_number"
+              "primary_document.$": "$$.Map.Item.Value.primary_document"
+              "filing_date.$": "$$.Map.Item.Value.filing_date"
+              "company_name.$": "$$.Map.Item.Value.company_name"
+              "ticker.$":       "$$.Map.Item.Value.ticker"
+              "exchange.$":     "$$.Map.Item.Value.exchange"
+            Iterator:
+              StartAt: ExtractFilingText
+              States:
+                ExtractFilingText:
+                  Type: Task
+                  Resource:
+                    Fn::GetAtt: [ExtractFilingTextLambdaFunction, Arn]
+                  Next: ChunkText
+                ChunkText:
+                  Type: Task
+                  Resource:
+                    Fn::GetAtt: [ChunkTextLambdaFunction, Arn]
+                  Next: EmbedChunks
+                EmbedChunks:
+                  Type: Task
+                  Resource:
+                    Fn::GetAtt: [EmbedChunksLambdaFunction, Arn]
+                  Next: StoreToRds
+                StoreToRds:
+                  Type: Task
+                  Resource:
+                    Fn::GetAtt: [StoreToRdsLambdaFunction, Arn]
+                  Next: ExtractQuestions
+                ExtractQuestions:
+                  Type: Task
+                  Resource:
+                    Fn::GetAtt: [ExtractQuestionsLambdaFunction, Arn]
+                  Next: SuccessState
+                SuccessState:
+                  Type: Succeed
+            Next: Success
+          Success:
+            Type: Succeed
+
+    proxyVoteStateMachine:
+      name: voting-engine-state-machine
+      definition:
+        StartAt: FetchPending
+        States:
+          FetchPending:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [GetPendingQuestionsLambdaFunction, Arn]
+            Next: FanOut
+          FanOut:
+            Type: Map
+            ItemsPath: $
+            MaxConcurrency: 20
+            Iterator:
+              StartAt: MarkProcessing
+              States:
+                MarkProcessing:
+                  Type: Task
+                  Resource:
+                    Fn::GetAtt: [MarkProcessingLambdaFunction, Arn]
+                  Next: GenerateRec
+                GenerateRec:
+                  Type: Task
+                  Resource:
+                    Fn::GetAtt: [GenerateRecLambdaFunction, Arn]
+                  TimeoutSeconds: 90
+                  Retry:
+                    - ErrorEquals: ["States.TaskFailed"]
+                      IntervalSeconds: 30
+                      MaxAttempts: 2
+                  Catch:
+                  - ErrorEquals: ["States.ALL"]
+                    ResultPath: "$.error_info"
+                    Next: MarkError
+                  Next: StoreRec
+                StoreRec:
+                  Type: Task
+                  Resource:
+                    Fn::GetAtt: [StoreRecLambdaFunction, Arn]
+                  Next: SuccessState
+                MarkError:
+                  Type: Task
+                  Resource:
+                    Fn::GetAtt: [MarkErrorLambdaFunction, Arn]
+                  Next: SuccessState
+                SuccessState:
+                  Type: Succeed
+            Next: Success
+          Success:
+            Type: Succeed
